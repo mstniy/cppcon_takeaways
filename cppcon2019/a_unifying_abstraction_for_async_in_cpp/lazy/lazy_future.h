@@ -39,27 +39,46 @@ namespace lazy {
 			void set_value(auto&&... vs) {set<2>(std::forward<decltype(vs)>(vs)...);}
 			void set_exception(auto e) {set<1>(e);}
 		};
+
+		template<typename Result, typename Callback>
+		struct typed_task_
+		{
+			using ResultType = Result;
+			Callback cb;
+		};
 	};
 
 	auto new_thread() {
-		return [](auto p){
+		auto lmbd =  [](auto p){
 			std::thread t{ [p = std::move(p)]() mutable {
 				p.set_value();
 			}};
 			t.detach();
 		};
+		return detail::typed_task_<void, decltype(lmbd)>{std::move(lmbd)};
 	}
 
 	auto then(auto task, auto fun) {
-		return [=](auto p){
-			task(detail::then_promise_<decltype(p), decltype(fun)>{p, fun});
+		auto lmbd = [=](auto p){
+			task.cb(detail::then_promise_<decltype(p), decltype(fun)>{p, fun});
 		};
+		using Fun = decltype(fun);
+		using TaskResult = typename decltype(task)::ResultType;
+		if constexpr (std::is_void_v<TaskResult>){
+			using FunResult = std::result_of_t<Fun&&()>;
+			return detail::typed_task_<FunResult, decltype(lmbd)>{std::move(lmbd)};
+		}
+		else {
+			using FunResult = std::result_of_t<Fun&&(TaskResult&&)>;
+			return detail::typed_task_<FunResult, decltype(lmbd)>{std::move(lmbd)};
+		}
 	}
 
-	template<class T, class Task>
-	T sync_wait(Task task) {
+	template<class Task>
+	auto sync_wait(Task task) {
+		using T = typename Task::ResultType;
 		detail::wait_state_<T> state;
-		task(detail::wait_promise_<T>{&state});
+		task.cb(detail::wait_promise_<T>{&state});
 
 		if (true) {
 			std::unique_lock<std::mutex> lk(state.mtx);
