@@ -1,10 +1,10 @@
 #include "lazy_future.h"
 
 #include <iostream>
-#include <memory>
 
-auto async_algo(auto task) {
-	return lazy::then(task, []{
+template<typename Task>
+auto async_algo(Task task) {
+	return lazy::then(std::move(task), [] {
 		std::cout << "Calculating..." << std::endl;
 		std::this_thread::sleep_for(std::chrono::seconds(1)); // Working hard
 		return 42;
@@ -13,11 +13,11 @@ auto async_algo(auto task) {
 
 int main() {
 	auto f = async_algo(lazy::new_thread());
-	auto f2 = then(f, [](int i){
+	auto f2 = lazy::then(std::move(f), [](int i){
 		return i+1;
 	});
 
-	std::cout << lazy::sync_wait(f2) << std::endl;
+	std::cout << lazy::sync_wait(std::move(f2)) << std::endl;
 
 	return 0;
 }

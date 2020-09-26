@@ -15,8 +15,10 @@ namespace lazy {
 		struct then_promise_ {
 			P p_;
 			Fun fun_;
-			void set_value(auto&&... vs) {p_.set_value(fun_(std::forward<decltype(vs)>(vs)...));}
-			void set_exception(auto e) {p_.set_exception(e);}
+			template<typename... VS>
+			void set_value(VS&&... vs) {p_.set_value(fun_(std::forward<VS>(vs)...));}
+			template<typename E>
+			void set_exception(E e) {p_.set_exception(e);}
 		};
 
 		template<typename T>
@@ -30,14 +32,16 @@ namespace lazy {
 		struct wait_promise_ {
 			wait_state_<T>* pst;
 
-			template<int I> void set(auto&&... xs) {
+			template<int I, typename... XS> void set(XS&&... xs) {
 				std::unique_lock<std::mutex> lk(pst->mtx);
-				pst->data.template emplace<I>(std::forward<decltype(xs)>(xs)...);
+				pst->data.template emplace<I>(std::forward<XS>(xs)...);
 				pst->cv.notify_one();
 			}
 
-			void set_value(auto&&... vs) {set<2>(std::forward<decltype(vs)>(vs)...);}
-			void set_exception(auto e) {set<1>(e);}
+			template<typename... VS>
+			void set_value(VS&&... vs) {set<2>(std::forward<VS>(vs)...);}
+			template<typename E>
+			void set_exception(E e) {set<1>(e);}
 		};
 
 		template<typename Result, typename Callback>
@@ -58,12 +62,12 @@ namespace lazy {
 		return detail::typed_task_<void, decltype(lmbd)>{std::move(lmbd)};
 	}
 
-	auto then(auto task, auto fun) {
-		auto lmbd = [=](auto p){
-			task.cb(detail::then_promise_<decltype(p), decltype(fun)>{p, fun});
+	template<typename Task, typename Fun>
+	auto then(Task task, Fun fun) {
+		auto lmbd = [task=std::move(task), fun=std::move(fun)](auto p) mutable{
+			task.cb(detail::then_promise_<decltype(p), Fun>{std::move(p), std::move(fun)});
 		};
-		using Fun = decltype(fun);
-		using TaskResult = typename decltype(task)::ResultType;
+		using TaskResult = typename Task::ResultType;
 		if constexpr (std::is_void_v<TaskResult>){
 			using FunResult = std::result_of_t<Fun&&()>;
 			return detail::typed_task_<FunResult, decltype(lmbd)>{std::move(lmbd)};
