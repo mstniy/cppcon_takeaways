@@ -49,6 +49,21 @@ namespace lazy {
 		{
 			using ResultType = Result;
 			Callback cb;
+
+			template<typename Fun>
+			auto then(Fun fun) {
+				auto lmbd = [cb=std::move(cb), fun=std::move(fun)](auto p) mutable{
+					cb(detail::then_promise_<decltype(p), Fun>{std::move(p), std::move(fun)});
+				};
+				if constexpr (std::is_void_v<Result>){
+					using FunResult = std::result_of_t<Fun&&()>;
+					return detail::typed_task_<FunResult, decltype(lmbd)>{std::move(lmbd)};
+				}
+				else {
+					using FunResult = std::result_of_t<Fun&&(Result&&)>;
+					return detail::typed_task_<FunResult, decltype(lmbd)>{std::move(lmbd)};
+				}
+			}
 		};
 	};
 
@@ -60,22 +75,6 @@ namespace lazy {
 			t.detach();
 		};
 		return detail::typed_task_<void, decltype(lmbd)>{std::move(lmbd)};
-	}
-
-	template<typename Task, typename Fun>
-	auto then(Task task, Fun fun) {
-		auto lmbd = [task=std::move(task), fun=std::move(fun)](auto p) mutable{
-			task.cb(detail::then_promise_<decltype(p), Fun>{std::move(p), std::move(fun)});
-		};
-		using TaskResult = typename Task::ResultType;
-		if constexpr (std::is_void_v<TaskResult>){
-			using FunResult = std::result_of_t<Fun&&()>;
-			return detail::typed_task_<FunResult, decltype(lmbd)>{std::move(lmbd)};
-		}
-		else {
-			using FunResult = std::result_of_t<Fun&&(TaskResult&&)>;
-			return detail::typed_task_<FunResult, decltype(lmbd)>{std::move(lmbd)};
-		}
 	}
 
 	template<class Task>
