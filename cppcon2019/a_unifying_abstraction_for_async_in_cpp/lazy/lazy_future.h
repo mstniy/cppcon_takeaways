@@ -44,6 +44,85 @@ namespace lazy {
 			void set_exception(E e) {set<1>(e);}
 		};
 
+		template<typename... T>
+		struct multi_wait_any_state_ {
+			std::mutex mtx;
+			std::condition_variable cv;
+			std::tuple<std::variant<std::monostate, std::exception_ptr, T>...> datas;
+		};
+
+		template<typename... T>
+		struct multi_wait_all_state_ : multi_wait_any_state_<T...>{
+			std::size_t num_finished = 0;
+			static constexpr std::size_t num_tasks = sizeof...(T);
+		};
+
+		template<typename MultiWaitState, int I>
+		struct multi_wait_any_promise_ {
+			MultiWaitState* pst;
+
+			template<int J, typename... XS> void set(XS&&... xs) {
+				std::unique_lock<std::mutex> lk(pst->mtx);
+				std::get<I>(pst->datas).template emplace<J>(std::forward<XS>(xs)...);
+				pst->cv.notify_one();
+			}
+
+			template<typename... VS>
+			void set_value(VS&&... vs) {set<2>(std::forward<VS>(vs)...);}
+			template<typename E>
+			void set_exception(E e) {set<1>(e);}
+		};
+
+		template<typename MultiWaitState, int I>
+		struct multi_wait_all_promise_ {
+			MultiWaitState* pst;
+
+			template<int J, typename... XS> void set(XS&&... xs) {
+				std::unique_lock<std::mutex> lk(pst->mtx);
+				std::get<I>(pst->datas).template emplace<J>(std::forward<XS>(xs)...);
+				pst->num_finished += 1;
+				if (pst->num_finished == pst->num_tasks)
+					pst->cv.notify_one();
+			}
+
+			template<typename... VS>
+			void set_value(VS&&... vs) {set<2>(std::forward<VS>(vs)...);}
+			template<typename E>
+			void set_exception(E e) {set<1>(e);}
+		};
+
+		template<class Tasks, class MultiWaitState, std::size_t... Indices>
+		auto sync_wait_any_helper_(Tasks tasks, MultiWaitState* state, std::index_sequence<Indices...>)
+		{
+			(..., std::get<Indices>(tasks).cb(detail::multi_wait_any_promise_<MultiWaitState, Indices>{state}));
+
+			std::size_t finished_index;
+
+			if (true) {
+				std::unique_lock<std::mutex> lk(state->mtx);
+				state->cv.wait(lk, [state, &finished_index]() mutable {
+					return (... || (finished_index = Indices, std::get<Indices>(state->datas).index() != 0));
+				});
+			}
+
+			return std::make_pair(finished_index, std::move(state->datas));
+		}
+
+		template<class Tasks, class MultiWaitState, std::size_t... Indices>
+		auto sync_wait_all_helper_(Tasks tasks, MultiWaitState* state, std::index_sequence<Indices...>)
+		{
+			(..., std::get<Indices>(tasks).cb(detail::multi_wait_all_promise_<MultiWaitState, Indices>{state}));
+
+			if (true) {
+				std::unique_lock<std::mutex> lk(state->mtx);
+				state->cv.wait(lk, [state]() {
+					return state->num_finished == state->num_tasks;
+				});
+			}
+
+			return std::move(state->datas);
+		}
+
 		template<typename Result, typename Callback>
 		struct typed_task_
 		{
@@ -94,6 +173,20 @@ namespace lazy {
 			std::rethrow_exception(std::get<1>(state.data));
 
 		return std::move(std::get<2>(state.data));
+	}
+
+	// Returns std::pair<finished task index, std::tuple<std::variant<std::monostate, std::exception_ptr, Tasks::ResultType>...>>
+	template<class... Tasks>
+	auto sync_wait_any(Tasks... tasks) {
+		detail::multi_wait_any_state_<typename Tasks::ResultType...> state;
+		return detail::sync_wait_any_helper_(std::forward_as_tuple(tasks...), &state, std::make_index_sequence<sizeof...(Tasks)>{});
+	}
+
+	// Returns std::pair<finished task index, std::tuple<std::variant<std::monostate, std::exception_ptr, Tasks::ResultType>...>>
+	template<class... Tasks>
+	auto sync_wait_all(Tasks... tasks) {
+		detail::multi_wait_all_state_<typename Tasks::ResultType...> state;
+		return detail::sync_wait_all_helper_(std::forward_as_tuple(tasks...), &state, std::make_index_sequence<sizeof...(Tasks)>{});
 	}
 };
 
