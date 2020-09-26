@@ -20,10 +20,9 @@ int main() {
 	});
 	auto f2 = lazy::new_thread().then(async_algo_slow);
 
-	//auto result = lazy::sync_wait_all(std::move(f1), std::move(f2));
-
-	auto result = lazy::sync_wait_any(std::move(f2), std::move(f1));
-	std::cout << result.first << std::endl;
+	auto result = lazy::wait_all(std::move(f1), std::move(f2));
+	std::cout << std::get<1>(std::get<0>(result)) << std::endl;
+	std::cout << std::get<1>(std::get<1>(result)) << std::endl;
 
 	return 0;
 }

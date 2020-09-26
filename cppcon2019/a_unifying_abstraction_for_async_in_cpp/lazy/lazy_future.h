@@ -7,6 +7,7 @@
 #include <utility>
 #include <variant>
 #include <exception>
+#include <vector>
 
 namespace lazy {
 
@@ -16,7 +17,14 @@ namespace lazy {
 			P p_;
 			Fun fun_;
 			template<typename... VS>
-			void set_value(VS&&... vs) {p_.set_value(fun_(std::forward<VS>(vs)...));}
+			void set_value(VS&&... vs) {
+				try {
+					p_.set_value(fun_(std::forward<VS>(vs)...));
+				}
+				catch(...) {
+					p_.set_exception(std::current_exception());
+				}
+			}
 			template<typename E>
 			void set_exception(E e) {p_.set_exception(e);}
 		};
@@ -44,33 +52,48 @@ namespace lazy {
 			void set_exception(E e) {set<1>(e);}
 		};
 
-		template<typename... T>
-		struct multi_wait_any_state_ {
+		template<typename T>
+		struct vector_multi_wait_all_state_ {
 			std::mutex mtx;
 			std::condition_variable cv;
-			std::tuple<std::variant<std::monostate, std::exception_ptr, T>...> datas;
-		};
-
-		template<typename... T>
-		struct multi_wait_all_state_ : multi_wait_any_state_<T...>{
+			std::vector<std::variant<std::exception_ptr, T>> datas;
 			std::size_t num_finished = 0;
-			static constexpr std::size_t num_tasks = sizeof...(T);
+			vector_multi_wait_all_state_(std::size_t size):
+				datas(size)
+			{}
 		};
 
-		template<typename MultiWaitState, int I>
-		struct multi_wait_any_promise_ {
+		template<typename MultiWaitState>
+		struct vector_multi_wait_all_promise_ {
 			MultiWaitState* pst;
+			std::size_t index;
 
-			template<int J, typename... XS> void set(XS&&... xs) {
+			template<int I, typename... XS> void set(XS&&... xs) {
 				std::unique_lock<std::mutex> lk(pst->mtx);
-				std::get<I>(pst->datas).template emplace<J>(std::forward<XS>(xs)...);
-				pst->cv.notify_one();
+				pst->datas[index].template emplace<I>(std::forward<XS>(xs)...);
+				pst->num_finished += 1;
+				if (pst->num_finished == pst->datas.size())
+					pst->cv.notify_one();
 			}
 
 			template<typename... VS>
-			void set_value(VS&&... vs) {set<2>(std::forward<VS>(vs)...);}
+			void set_value(VS&&... vs) {set<1>(std::forward<VS>(vs)...);}
 			template<typename E>
-			void set_exception(E e) {set<1>(e);}
+			void set_exception(E e) {set<0>(e);}
+
+			vector_multi_wait_all_promise_(MultiWaitState* state, std::size_t index):
+				pst(state),
+				index(index)
+			{}
+		};
+
+		template<typename... T>
+		struct multi_wait_all_state_ {
+			std::mutex mtx;
+			std::condition_variable cv;
+			std::tuple<std::variant<std::exception_ptr, T>...> datas;
+			std::size_t num_finished = 0;
+			static constexpr std::size_t num_tasks = sizeof...(T);
 		};
 
 		template<typename MultiWaitState, int I>
@@ -86,30 +109,13 @@ namespace lazy {
 			}
 
 			template<typename... VS>
-			void set_value(VS&&... vs) {set<2>(std::forward<VS>(vs)...);}
+			void set_value(VS&&... vs) {set<1>(std::forward<VS>(vs)...);}
 			template<typename E>
-			void set_exception(E e) {set<1>(e);}
+			void set_exception(E e) {set<0>(e);}
 		};
 
 		template<class Tasks, class MultiWaitState, std::size_t... Indices>
-		auto sync_wait_any_helper_(Tasks tasks, MultiWaitState* state, std::index_sequence<Indices...>)
-		{
-			(..., std::get<Indices>(tasks).cb(detail::multi_wait_any_promise_<MultiWaitState, Indices>{state}));
-
-			std::size_t finished_index;
-
-			if (true) {
-				std::unique_lock<std::mutex> lk(state->mtx);
-				state->cv.wait(lk, [state, &finished_index]() mutable {
-					return (... || (finished_index = Indices, std::get<Indices>(state->datas).index() != 0));
-				});
-			}
-
-			return std::make_pair(finished_index, std::move(state->datas));
-		}
-
-		template<class Tasks, class MultiWaitState, std::size_t... Indices>
-		auto sync_wait_all_helper_(Tasks tasks, MultiWaitState* state, std::index_sequence<Indices...>)
+		auto wait_all_helper_(Tasks tasks, MultiWaitState* state, std::index_sequence<Indices...>)
 		{
 			(..., std::get<Indices>(tasks).cb(detail::multi_wait_all_promise_<MultiWaitState, Indices>{state}));
 
@@ -157,7 +163,7 @@ namespace lazy {
 	}
 
 	template<class Task>
-	auto sync_wait(Task task) {
+	auto wait(Task task) {
 		using T = typename Task::ResultType;
 		detail::wait_state_<T> state;
 		task.cb(detail::wait_promise_<T>{&state});
@@ -175,19 +181,32 @@ namespace lazy {
 		return std::move(std::get<2>(state.data));
 	}
 
-	// Returns std::pair<finished task index, std::tuple<std::variant<std::monostate, std::exception_ptr, Tasks::ResultType>...>>
-	template<class... Tasks>
-	auto sync_wait_any(Tasks... tasks) {
-		detail::multi_wait_any_state_<typename Tasks::ResultType...> state;
-		return detail::sync_wait_any_helper_(std::forward_as_tuple(tasks...), &state, std::make_index_sequence<sizeof...(Tasks)>{});
+	// Returns std::vector<std::variant<std::exception_ptr, Task::ResultType>>
+	template<class Task>
+	auto wait_all(std::vector<Task> tasks) {
+		detail::vector_multi_wait_all_state_<typename Task::ResultType> state(tasks.size());
+		for (std::size_t i=0; i<tasks.size(); i++)
+			tasks[i].cb(detail::vector_multi_wait_all_promise_<decltype(state)>{&state, i});
+
+		if (true) {
+			std::unique_lock<std::mutex> lk(state.mtx);
+			state.cv.wait(lk, [&tasks, &state]() {
+				return state.num_finished == tasks.size();
+			});
+		}
+
+		return std::move(state.datas);
 	}
 
-	// Returns std::pair<finished task index, std::tuple<std::variant<std::monostate, std::exception_ptr, Tasks::ResultType>...>>
+	// Returns std::tuple<std::variant<std::exception_ptr, Tasks::ResultType>...>
 	template<class... Tasks>
-	auto sync_wait_all(Tasks... tasks) {
+	auto wait_all(Tasks... tasks) {
 		detail::multi_wait_all_state_<typename Tasks::ResultType...> state;
-		return detail::sync_wait_all_helper_(std::forward_as_tuple(tasks...), &state, std::make_index_sequence<sizeof...(Tasks)>{});
+		return detail::wait_all_helper_(std::forward_as_tuple(tasks...), &state, std::make_index_sequence<sizeof...(Tasks)>{});
 	}
+
+	// TODO: wait_all_windows to start at most N tasks at once.
+	// TODO: async waits
 };
 
 #endif
