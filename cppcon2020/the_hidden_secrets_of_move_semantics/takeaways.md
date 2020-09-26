@@ -28,7 +28,7 @@ Use `auto&&` instead: `for (auto&& val: vals)`
 
 Very easy to run into UB:
 
-```
+```c++
 class Class {
     ...
     
@@ -45,7 +45,7 @@ for (const auto& v : getInstance().getValues()) // UB
     ...
 ```
 Solution: Have two getters
-```
+```c++
 class Class {
     ...
     const vector<int>& getValues() const& {
