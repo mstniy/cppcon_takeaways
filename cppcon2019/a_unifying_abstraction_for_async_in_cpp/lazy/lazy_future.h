@@ -12,6 +12,17 @@
 namespace lazy {
 
 	namespace detail {
+		// void breaks generic code. We cannot have a void as a member of std::variant, for example.
+		// So replace void with std::monostate
+		template<typename T>
+		struct void_fallback { typedef T type; };
+
+		template<>
+		struct void_fallback<void> { typedef std::monostate type; };
+
+		template<typename T>
+		using void_fallback_t = typename void_fallback<T>::type;
+
 		template<typename P, typename Fun>
 		struct then_promise_ {
 			P p_;
@@ -19,7 +30,14 @@ namespace lazy {
 			template<typename... VS>
 			void set_value(VS&&... vs) {
 				try {
-					p_.set_value(fun_(std::forward<VS>(vs)...));
+					using FunResult = std::result_of_t<Fun&&(VS&&...)>;
+					if constexpr (std::is_void_v<FunResult>)
+					{
+						fun_(std::forward<VS>(vs)...);
+						p_.set_value();
+					}
+					else
+						p_.set_value(fun_(std::forward<VS>(vs)...));
 				}
 				catch(...) {
 					p_.set_exception(std::current_exception());
@@ -207,7 +225,7 @@ namespace lazy {
 
 	template<class Task>
 	auto wait(Task task) {
-		using T = typename Task::ResultType;
+		using T = detail::void_fallback_t<typename Task::ResultType>;
 		detail::wait_state_<T> state;
 		task.cb(detail::wait_promise_<T>{&state});
 
@@ -221,13 +239,16 @@ namespace lazy {
 		if (state.data.index() == 1)
 			std::rethrow_exception(std::get<1>(state.data));
 
-		return std::move(std::get<2>(state.data));
+		if constexpr (std::is_void_v<typename Task::ResultType>)
+			return ;
+		else
+			return std::move(std::get<2>(state.data));
 	}
 
 	// Returns std::vector<std::variant<std::exception_ptr, Task::ResultType>>
 	template<class Task>
 	auto wait_all(std::vector<Task> tasks) {
-		detail::vector_wait_all_state_<typename Task::ResultType> state(tasks.size());
+		detail::vector_wait_all_state_<detail::void_fallback_t<typename Task::ResultType>> state(tasks.size());
 		for (std::size_t i=0; i<tasks.size(); i++)
 			tasks[i].cb(detail::vector_wait_all_promise_<decltype(state)>{&state, i});
 
@@ -241,21 +262,21 @@ namespace lazy {
 		return std::move(state.datas);
 	}
 
-	// Returns std::tuple<std::variant<std::exception_ptr, Tasks::ResultType>...>
+	// Returns std::tuple<std::variant<std::exception_ptr, detail::void_fallback_t<Tasks::ResultType>>...>
 	template<class... Tasks>
 	auto wait_all(Tasks... tasks) {
-		detail::wait_all_state_<typename Tasks::ResultType...> state;
+		detail::wait_all_state_<detail::void_fallback_t<typename Tasks::ResultType>...> state;
 		return detail::wait_all_helper_(std::forward_as_tuple(tasks...), &state, std::make_index_sequence<sizeof...(Tasks)>{});
 	}
 
 	template<class... Tasks>
 	auto when_all(Tasks... tasks) {
 		auto lmbd = [tasks = std::make_tuple(std::move(tasks)...)](auto p) mutable {
-			auto state = std::make_shared<detail::when_all_state_<decltype(p), typename Tasks::ResultType...>>(std::move(p)); // TODO: Can we have something lighter than std::shared_ptr? We already do our reference counting in detail::when_all_state_
+			auto state = std::make_shared<detail::when_all_state_<decltype(p), detail::void_fallback_t<typename Tasks::ResultType>...>>(std::move(p)); // TODO: Can we have something lighter than std::shared_ptr? We already do our reference counting in detail::when_all_state_
 			detail::when_all_helper_(std::move(tasks), std::move(state), std::make_index_sequence<sizeof...(Tasks)>{});
 		};
 
-		return detail::typed_task_<std::tuple<std::variant<std::exception_ptr, typename Tasks::ResultType>...>, decltype(lmbd)>{std::move(lmbd)};
+		return detail::typed_task_<std::tuple<std::variant<std::exception_ptr, detail::void_fallback_t<typename Tasks::ResultType>>...>, decltype(lmbd)>{std::move(lmbd)};
 	}
 
 	// TODO: wait/when_all_windows to start at most N tasks at once.
