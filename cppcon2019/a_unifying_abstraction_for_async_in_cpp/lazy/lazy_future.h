@@ -53,18 +53,18 @@ namespace lazy {
 		};
 
 		template<typename T>
-		struct vector_multi_wait_all_state_ {
+		struct vector_wait_all_state_ {
 			std::mutex mtx;
 			std::condition_variable cv;
 			std::vector<std::variant<std::exception_ptr, T>> datas;
 			std::size_t num_finished = 0;
-			vector_multi_wait_all_state_(std::size_t size):
+			vector_wait_all_state_(std::size_t size):
 				datas(size)
 			{}
 		};
 
 		template<typename MultiWaitState>
-		struct vector_multi_wait_all_promise_ {
+		struct vector_wait_all_promise_ {
 			MultiWaitState* pst;
 			std::size_t index;
 
@@ -81,14 +81,14 @@ namespace lazy {
 			template<typename E>
 			void set_exception(E e) {set<0>(e);}
 
-			vector_multi_wait_all_promise_(MultiWaitState* state, std::size_t index):
+			vector_wait_all_promise_(MultiWaitState* state, std::size_t index):
 				pst(state),
 				index(index)
 			{}
 		};
 
 		template<typename... T>
-		struct multi_wait_all_state_ {
+		struct wait_all_state_ {
 			std::mutex mtx;
 			std::condition_variable cv;
 			std::tuple<std::variant<std::exception_ptr, T>...> datas;
@@ -97,7 +97,7 @@ namespace lazy {
 		};
 
 		template<typename MultiWaitState, int I>
-		struct multi_wait_all_promise_ {
+		struct wait_all_promise_ {
 			MultiWaitState* pst;
 
 			template<int J, typename... XS> void set(XS&&... xs) {
@@ -117,7 +117,7 @@ namespace lazy {
 		template<class Tasks, class MultiWaitState, std::size_t... Indices>
 		auto wait_all_helper_(Tasks tasks, MultiWaitState* state, std::index_sequence<Indices...>)
 		{
-			(..., std::get<Indices>(tasks).cb(detail::multi_wait_all_promise_<MultiWaitState, Indices>{state}));
+			(..., std::get<Indices>(tasks).cb(detail::wait_all_promise_<MultiWaitState, Indices>{state}));
 
 			if (true) {
 				std::unique_lock<std::mutex> lk(state->mtx);
@@ -127,6 +127,49 @@ namespace lazy {
 			}
 
 			return std::move(state->datas);
+		}
+
+		template<typename P, typename... T>
+		struct when_all_state_ {
+			P p; // The promise to be called when all tasks finish
+			std::mutex mtx; // Note the absence of a std::condition_variable. There is no one to notify because this is an async wait.
+			std::tuple<std::variant<std::exception_ptr, T>...> datas;
+			std::size_t num_finished = 0;
+			static constexpr std::size_t num_tasks = sizeof...(T);
+
+			when_all_state_(P p):
+				p(std::move(p))
+			{}
+		};
+
+		template<typename MultiWaitState, int I>
+		struct when_all_promise_ {
+			std::shared_ptr<MultiWaitState> pst;
+
+			template<int J, typename... XS> void set(XS&&... xs) {
+				std::size_t finish_id;
+				if (true)
+				{
+					std::unique_lock<std::mutex> lk(pst->mtx);
+					std::get<I>(pst->datas).template emplace<J>(std::forward<XS>(xs)...);
+					pst->num_finished += 1;
+					finish_id = pst->num_finished;
+				}
+				if (finish_id == pst->num_tasks) { // Last task to end calls the promise
+					pst->p.set_value(std::move(pst->datas));
+				}
+			}
+
+			template<typename... VS>
+			void set_value(VS&&... vs) {set<1>(std::forward<VS>(vs)...);}
+			template<typename E>
+			void set_exception(E e) {set<0>(e);}
+		};
+
+		template<class Tasks, class MultiWaitState, std::size_t... Indices>
+		void when_all_helper_(Tasks tasks, std::shared_ptr<MultiWaitState> state, std::index_sequence<Indices...>)
+		{
+			(..., std::get<Indices>(tasks).cb(detail::when_all_promise_<MultiWaitState, Indices>{state}));
 		}
 
 		template<typename Result, typename Callback>
@@ -184,9 +227,9 @@ namespace lazy {
 	// Returns std::vector<std::variant<std::exception_ptr, Task::ResultType>>
 	template<class Task>
 	auto wait_all(std::vector<Task> tasks) {
-		detail::vector_multi_wait_all_state_<typename Task::ResultType> state(tasks.size());
+		detail::vector_wait_all_state_<typename Task::ResultType> state(tasks.size());
 		for (std::size_t i=0; i<tasks.size(); i++)
-			tasks[i].cb(detail::vector_multi_wait_all_promise_<decltype(state)>{&state, i});
+			tasks[i].cb(detail::vector_wait_all_promise_<decltype(state)>{&state, i});
 
 		if (true) {
 			std::unique_lock<std::mutex> lk(state.mtx);
@@ -201,12 +244,22 @@ namespace lazy {
 	// Returns std::tuple<std::variant<std::exception_ptr, Tasks::ResultType>...>
 	template<class... Tasks>
 	auto wait_all(Tasks... tasks) {
-		detail::multi_wait_all_state_<typename Tasks::ResultType...> state;
+		detail::wait_all_state_<typename Tasks::ResultType...> state;
 		return detail::wait_all_helper_(std::forward_as_tuple(tasks...), &state, std::make_index_sequence<sizeof...(Tasks)>{});
 	}
 
-	// TODO: wait_all_windows to start at most N tasks at once.
-	// TODO: async waits
+	template<class... Tasks>
+	auto when_all(Tasks... tasks) {
+		auto lmbd = [tasks = std::make_tuple(std::move(tasks)...)](auto p) mutable {
+			auto state = std::make_shared<detail::when_all_state_<decltype(p), typename Tasks::ResultType...>>(std::move(p)); // TODO: Can we have something lighter than std::shared_ptr? We already do our reference counting in detail::when_all_state_
+			detail::when_all_helper_(std::move(tasks), std::move(state), std::make_index_sequence<sizeof...(Tasks)>{});
+		};
+
+		return detail::typed_task_<std::tuple<std::variant<std::exception_ptr, typename Tasks::ResultType>...>, decltype(lmbd)>{std::move(lmbd)};
+	}
+
+	// TODO: wait/when_all_windows to start at most N tasks at once.
+	// TODO: async waits on std::vector
 };
 
 #endif
