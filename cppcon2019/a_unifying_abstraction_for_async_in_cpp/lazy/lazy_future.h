@@ -272,8 +272,16 @@ namespace lazy {
 	template<class... Tasks>
 	auto when_all(Tasks... tasks) {
 		auto lmbd = [tasks = std::make_tuple(std::move(tasks)...)](auto p) mutable {
-			auto state = std::make_shared<detail::when_all_state_<decltype(p), detail::void_fallback_t<typename Tasks::ResultType>...>>(std::move(p)); // TODO: Can we have something lighter than std::shared_ptr? We already do our reference counting in detail::when_all_state_
-			detail::when_all_helper_(std::move(tasks), std::move(state), std::make_index_sequence<sizeof...(Tasks)>{});
+			if constexpr (sizeof...(Tasks) == 0) {
+				p.set_value(std::tuple<>{});
+			}
+			else {
+				auto state = std::make_shared<detail::when_all_state_<decltype(p), detail::void_fallback_t<typename Tasks::ResultType>...>>(std::move(p)); // TODO: Can we have something lighter than std::shared_ptr? We already do our reference counting in detail::when_all_state_
+				//TODO: One way to avoid the shared pointer: Create a unique pointer, pass ownership to the first thread. Pass raw pointers to the rest.
+				//        The first thread waits for all others, and sets the promise.
+				//       Similar solution: use raw pointers. Pass raw pointers to all tasks. The first one waits for the rest, deletes the state and sets the promise. Make sure this is exception safe.
+				detail::when_all_helper_(std::move(tasks), std::move(state), std::make_index_sequence<sizeof...(Tasks)>{});
+			}
 		};
 
 		return detail::typed_task_<std::tuple<std::variant<std::exception_ptr, detail::void_fallback_t<typename Tasks::ResultType>>...>, decltype(lmbd)>{std::move(lmbd)};
