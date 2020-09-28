@@ -162,7 +162,15 @@ namespace lazy {
 
 		template<typename MultiWaitState, int I>
 		struct when_all_promise_ {
-			std::shared_ptr<MultiWaitState> pst;
+			MultiWaitState* pst;
+
+			when_all_promise_(MultiWaitState* pst):pst(pst){}
+
+			when_all_promise_(const when_all_promise_&) = delete;
+			when_all_promise_(when_all_promise_&& o)
+				: pst(o.pst) {
+				o.pst = nullptr;
+			}
 
 			template<int J, typename... XS> void set(XS&&... xs) {
 				std::size_t finish_id;
@@ -173,8 +181,9 @@ namespace lazy {
 					pst->num_finished += 1;
 					finish_id = pst->num_finished;
 				}
-				if (finish_id == pst->num_tasks) { // Last task to end calls the promise
+				if (finish_id == pst->num_tasks) { // Last task to end calls the promise and deletes the state
 					pst->p.set_value(std::move(pst->datas));
+					delete pst;
 				}
 			}
 
@@ -185,7 +194,7 @@ namespace lazy {
 		};
 
 		template<class Tasks, class MultiWaitState, std::size_t... Indices>
-		void when_all_helper_(Tasks tasks, std::shared_ptr<MultiWaitState> state, std::index_sequence<Indices...>)
+		void when_all_helper_(Tasks tasks, MultiWaitState* state, std::index_sequence<Indices...>)
 		{
 			(..., std::get<Indices>(tasks).cb(detail::when_all_promise_<MultiWaitState, Indices>{state}));
 		}
@@ -215,9 +224,15 @@ namespace lazy {
 
 	auto new_thread() {
 		auto lmbd =  [](auto p){
-			std::thread t{ [p = std::move(p)]() mutable {
-				p.set_value();
-			}};
+			std::thread t;
+			try {
+				t = std::thread{ [p = std::move(p)]() mutable {
+					p.set_value();
+				}};
+			}
+			catch (...) {
+				p.set_exception(std::current_exception());
+			}
 			t.detach();
 		};
 		return detail::typed_task_<void, decltype(lmbd)>{std::move(lmbd)};
@@ -276,10 +291,7 @@ namespace lazy {
 				p.set_value(std::tuple<>{});
 			}
 			else {
-				auto state = std::make_shared<detail::when_all_state_<decltype(p), detail::void_fallback_t<typename Tasks::ResultType>...>>(std::move(p)); // TODO: Can we have something lighter than std::shared_ptr? We already do our reference counting in detail::when_all_state_
-				//TODO: One way to avoid the shared pointer: Create a unique pointer, pass ownership to the first thread. Pass raw pointers to the rest.
-				//        The first thread waits for all others, and sets the promise.
-				//       Similar solution: use raw pointers. Pass raw pointers to all tasks. The first one waits for the rest, deletes the state and sets the promise. Make sure this is exception safe.
+				auto state = new detail::when_all_state_<decltype(p), detail::void_fallback_t<typename Tasks::ResultType>...>(std::move(p));
 				detail::when_all_helper_(std::move(tasks), std::move(state), std::make_index_sequence<sizeof...(Tasks)>{});
 			}
 		};
