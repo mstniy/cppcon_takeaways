@@ -8,6 +8,7 @@
 #include <variant>
 #include <exception>
 #include <vector>
+#include <atomic>
 
 namespace lazy {
 
@@ -150,9 +151,8 @@ namespace lazy {
 		template<typename P, typename... T>
 		struct when_all_state_ {
 			P p; // The promise to be called when all tasks finish
-			std::mutex mtx; // Note the absence of a std::condition_variable. There is no one to notify because this is an async wait.
 			std::tuple<std::variant<std::exception_ptr, T>...> datas;
-			std::size_t num_finished = 0;
+			std::atomic<std::size_t> num_finished = 0;
 			static constexpr std::size_t num_tasks = sizeof...(T);
 
 			when_all_state_(P p):
@@ -171,20 +171,19 @@ namespace lazy {
 				: pst(o.pst) {
 				o.pst = nullptr;
 			}
+			~when_all_promise_() {
+				if (pst != nullptr)
+				{
+					std::size_t finish_id = pst->num_finished.fetch_add(1)+1;
+					if (finish_id == pst->num_tasks) { // Last task to end calls the promise and deletes the state
+						pst->p.set_value(std::move(pst->datas));
+						delete pst;
+					}
+				}
+			}
 
 			template<int J, typename... XS> void set(XS&&... xs) {
-				std::size_t finish_id;
-				if (true)
-				{
-					std::unique_lock<std::mutex> lk(pst->mtx);
-					std::get<I>(pst->datas).template emplace<J>(std::forward<XS>(xs)...);
-					pst->num_finished += 1;
-					finish_id = pst->num_finished;
-				}
-				if (finish_id == pst->num_tasks) { // Last task to end calls the promise and deletes the state
-					pst->p.set_value(std::move(pst->datas));
-					delete pst;
-				}
+				std::get<I>(pst->datas).template emplace<J>(std::forward<XS>(xs)...); // This is NOT a race. Different tasks (on different threads) write to different memory locations.
 			}
 
 			template<typename... VS>
