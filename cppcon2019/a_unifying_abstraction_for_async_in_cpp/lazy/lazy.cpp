@@ -15,10 +15,10 @@ int async_algo_slow() {
 }
 
 int main() {
-	auto f1 = lazy::new_thread().then(async_algo_quick).then([](int i){
+	auto f1 = lazy::new_thread(async_algo_quick).then([](int i){
 		return i+1;
 	});
-	auto f2 = lazy::new_thread().then(async_algo_slow);
+	auto f2 = lazy::new_thread(async_algo_slow);
 
 	auto f3 = lazy::when_all(std::move(f1), std::move(f2)).then([](auto result){
 		std::cout << std::get<1>(std::get<0>(result)) << std::endl;

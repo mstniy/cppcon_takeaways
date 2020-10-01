@@ -50,7 +50,7 @@ namespace lazy {
 
 		template<typename T>
 		struct wait_state_ {
-			std::mutex mtx;
+			std::mutex mtx; // We can avoid these mutexes using c++20's std::atomic::wait, once compilers implement it.
 			std::condition_variable cv;
 			std::variant<std::monostate, std::exception_ptr, T> data;
 		};
@@ -221,7 +221,8 @@ namespace lazy {
 		};
 	};
 
-	auto new_thread() {
+	template<typename Fun>
+	auto new_thread(Fun fun) {
 		auto lmbd =  [](auto p){
 			std::thread t;
 			try {
@@ -234,7 +235,7 @@ namespace lazy {
 			}
 			t.detach();
 		};
-		return detail::typed_task_<void, decltype(lmbd)>{std::move(lmbd)};
+		return detail::typed_task_<void, decltype(lmbd)>{std::move(lmbd)}.then(std::move(fun));
 	}
 
 	template<class Task>
