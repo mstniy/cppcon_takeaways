@@ -9,6 +9,7 @@
 #include <exception>
 #include <vector>
 #include <atomic>
+#include <optional>
 
 namespace lazy {
 
@@ -23,6 +24,9 @@ namespace lazy {
 
 		template<typename T>
 		using void_fallback_t = typename void_fallback<T>::type;
+
+		template<typename>
+		struct empty_state{};
 
 		template<typename P, typename Fun>
 		struct then_promise_ {
@@ -46,6 +50,12 @@ namespace lazy {
 			}
 			template<typename E>
 			void set_exception(E e) {p_.set_exception(e);}
+		};
+
+		template<template<class P> class Substate, class Fun>
+		struct then_state_type_alias {
+			template<class P>
+			using type = Substate<then_promise_<P, Fun>>;
 		};
 
 		template<typename T>
@@ -148,16 +158,20 @@ namespace lazy {
 			return std::move(state->datas);
 		}
 
-		template<typename P, typename... T>
+		template<typename P, typename... Tasks>
 		struct when_all_state_ {
-			P p; // The promise to be called when all tasks finish
-			std::tuple<std::variant<std::exception_ptr, T>...> datas;
+			std::optional<P> p;	// The promise to be called when all tasks finish
+						// TODO: Can we avoid std::optional?
+			std::tuple<typename Tasks::template StateType<P>...> substates;
+			std::tuple<std::variant<std::exception_ptr, detail::void_fallback_t<typename Tasks::ResultType>>...> datas;
 			std::atomic<std::size_t> num_finished = 0;
-			static constexpr std::size_t num_tasks = sizeof...(T);
+			static constexpr std::size_t num_tasks = sizeof...(Tasks);
+		};
 
-			when_all_state_(P p):
-				p(std::move(p))
-			{}
+		template<class... Tasks>
+		struct when_all_state_alias {
+			template<typename P>
+			using type = when_all_state_<P, Tasks...>;
 		};
 
 		template<typename MultiWaitState, int I>
@@ -175,9 +189,8 @@ namespace lazy {
 				if (pst != nullptr)
 				{
 					std::size_t finish_id = pst->num_finished.fetch_add(1)+1;
-					if (finish_id == pst->num_tasks) { // Last task to end calls the promise and deletes the state
-						pst->p.set_value(std::move(pst->datas));
-						delete pst;
+					if (finish_id == pst->num_tasks) { // Last task to end calls the promise
+						pst->p->set_value(std::move(pst->datas));
 					}
 				}
 			}
@@ -195,27 +208,31 @@ namespace lazy {
 		template<class Tasks, class MultiWaitState, std::size_t... Indices>
 		void when_all_helper_(Tasks tasks, MultiWaitState* state, std::index_sequence<Indices...>)
 		{
-			(..., std::get<Indices>(tasks).cb(detail::when_all_promise_<MultiWaitState, Indices>{state}));
+			(..., std::get<Indices>(tasks).cb(detail::when_all_promise_<MultiWaitState, Indices>{state}, &std::get<Indices>(state->substates)));
 		}
 
-		template<typename Result, typename Callback>
+		template<typename Result, typename Callback, template<typename P> class State = detail::empty_state>
 		struct typed_task_
 		{
 			using ResultType = Result;
-			Callback cb;
+
+			template<typename P>
+			using StateType = State<P>;
+
+			Callback cb; // Signature: void(Promise, State<Promise>*)
 
 			template<typename Fun>
 			auto then(Fun fun) {
-				auto lmbd = [cb=std::move(cb), fun=std::move(fun)](auto p) mutable{
-					cb(detail::then_promise_<decltype(p), Fun>{std::move(p), std::move(fun)});
+				auto lmbd = [cb=std::move(cb), fun=std::move(fun)](auto p, auto* state) mutable{
+					cb(detail::then_promise_<decltype(p), Fun>{std::move(p), std::move(fun)}, state);
 				};
 				if constexpr (std::is_void_v<Result>){
 					using FunResult = std::result_of_t<Fun&&()>;
-					return detail::typed_task_<FunResult, decltype(lmbd)>{std::move(lmbd)};
+					return detail::typed_task_<FunResult, decltype(lmbd), then_state_type_alias<StateType, Fun>::template type>{std::move(lmbd)};
 				}
 				else {
 					using FunResult = std::result_of_t<Fun&&(Result&&)>;
-					return detail::typed_task_<FunResult, decltype(lmbd)>{std::move(lmbd)};
+					return detail::typed_task_<FunResult, decltype(lmbd), then_state_type_alias<StateType, Fun>::template type>{std::move(lmbd)};
 				}
 			}
 		};
@@ -223,7 +240,7 @@ namespace lazy {
 
 	template<typename Fun>
 	auto new_thread(Fun fun) {
-		auto lmbd =  [](auto p){
+		auto lmbd =  [](auto p, auto* /*state*/){
 			std::thread t;
 			try {
 				t = std::thread{ [p = std::move(p)]() mutable {
@@ -240,24 +257,26 @@ namespace lazy {
 
 	template<class Task>
 	auto wait(Task task) {
-		using T = detail::void_fallback_t<typename Task::ResultType>;
-		detail::wait_state_<T> state;
-		task.cb(detail::wait_promise_<T>{&state});
+		using TaskResult = detail::void_fallback_t<typename Task::ResultType>;
+		detail::wait_state_<TaskResult> wait_state;
+		detail::wait_promise_<TaskResult> promise{&wait_state};
+		typename Task::template StateType<decltype(promise)> task_state;
+		task.cb(std::move(promise), &task_state);
 
 		if (true) {
-			std::unique_lock<std::mutex> lk(state.mtx);
-			state.cv.wait(lk, [&state]{
-				return state.data.index() != 0;
+			std::unique_lock<std::mutex> lk(wait_state.mtx);
+			wait_state.cv.wait(lk, [&wait_state]{
+				return wait_state.data.index() != 0;
 			});
 		}
 
-		if (state.data.index() == 1)
-			std::rethrow_exception(std::get<1>(state.data));
+		if (wait_state.data.index() == 1)
+			std::rethrow_exception(std::get<1>(wait_state.data));
 
 		if constexpr (std::is_void_v<typename Task::ResultType>)
 			return ;
 		else
-			return std::move(std::get<2>(state.data));
+			return std::move(std::get<2>(wait_state.data));
 	}
 
 	// Returns std::vector<std::variant<std::exception_ptr, Task::ResultType>>
@@ -286,17 +305,18 @@ namespace lazy {
 
 	template<class... Tasks>
 	auto when_all(Tasks... tasks) {
-		auto lmbd = [tasks = std::make_tuple(std::move(tasks)...)](auto p) mutable {
+		auto lmbd = [tasks = std::make_tuple(std::move(tasks)...)](auto p, auto* state) mutable {
 			if constexpr (sizeof...(Tasks) == 0) {
 				p.set_value(std::tuple<>{});
 			}
 			else {
-				auto state = new detail::when_all_state_<decltype(p), detail::void_fallback_t<typename Tasks::ResultType>...>(std::move(p));
+				state->p.emplace(std::move(p));
 				detail::when_all_helper_(std::move(tasks), std::move(state), std::make_index_sequence<sizeof...(Tasks)>{});
 			}
 		};
 
-		return detail::typed_task_<std::tuple<std::variant<std::exception_ptr, detail::void_fallback_t<typename Tasks::ResultType>>...>, decltype(lmbd)>{std::move(lmbd)};
+		using TaskResult = std::tuple<std::variant<std::exception_ptr, detail::void_fallback_t<typename Tasks::ResultType>>...>;
+		return detail::typed_task_<TaskResult, decltype(lmbd), detail::when_all_state_alias<Tasks...>::template type>{std::move(lmbd)};
 	}
 
 	// TODO: wait/when_all_windows to start at most N tasks at once.
