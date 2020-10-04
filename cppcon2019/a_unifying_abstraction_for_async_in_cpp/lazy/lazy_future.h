@@ -116,48 +116,6 @@ namespace lazy {
 			{}
 		};
 
-		template<typename... T>
-		struct wait_all_state_ {
-			std::mutex mtx;
-			std::condition_variable cv;
-			std::tuple<std::variant<std::exception_ptr, T>...> datas;
-			std::size_t num_finished = 0;
-			static constexpr std::size_t num_tasks = sizeof...(T);
-		};
-
-		template<typename MultiWaitState, int I>
-		struct wait_all_promise_ {
-			MultiWaitState* pst;
-
-			template<int J, typename... XS> void set(XS&&... xs) {
-				std::unique_lock<std::mutex> lk(pst->mtx);
-				std::get<I>(pst->datas).template emplace<J>(std::forward<XS>(xs)...);
-				pst->num_finished += 1;
-				if (pst->num_finished == pst->num_tasks)
-					pst->cv.notify_one();
-			}
-
-			template<typename... VS>
-			void set_value(VS&&... vs) {set<1>(std::forward<VS>(vs)...);}
-			template<typename E>
-			void set_exception(E e) {set<0>(e);}
-		};
-
-		template<class Tasks, class MultiWaitState, std::size_t... Indices>
-		auto wait_all_helper_(Tasks tasks, MultiWaitState* state, std::index_sequence<Indices...>)
-		{
-			(..., std::get<Indices>(tasks).cb(detail::wait_all_promise_<MultiWaitState, Indices>{state}));
-
-			if (true) {
-				std::unique_lock<std::mutex> lk(state->mtx);
-				state->cv.wait(lk, [state]() {
-					return state->num_finished == state->num_tasks;
-				});
-			}
-
-			return std::move(state->datas);
-		}
-
 		template<typename P, typename... Tasks>
 		struct when_all_state_ {
 			std::optional<P> p;	// The promise to be called when all tasks finish
@@ -296,13 +254,6 @@ namespace lazy {
 		return std::move(state.datas);
 	}
 
-	// Returns std::tuple<std::variant<std::exception_ptr, detail::void_fallback_t<Tasks::ResultType>>...>
-	template<class... Tasks>
-	auto wait_all(Tasks... tasks) {
-		detail::wait_all_state_<detail::void_fallback_t<typename Tasks::ResultType>...> state;
-		return detail::wait_all_helper_(std::forward_as_tuple(tasks...), &state, std::make_index_sequence<sizeof...(Tasks)>{});
-	}
-
 	template<class... Tasks>
 	auto when_all(Tasks... tasks) {
 		auto lmbd = [tasks = std::make_tuple(std::move(tasks)...)](auto p, auto* state) mutable {
@@ -317,6 +268,12 @@ namespace lazy {
 
 		using TaskResult = std::tuple<std::variant<std::exception_ptr, detail::void_fallback_t<typename Tasks::ResultType>>...>;
 		return detail::typed_task_<TaskResult, decltype(lmbd), detail::when_all_state_alias<Tasks...>::template type>{std::move(lmbd)};
+	}
+
+	// Returns std::tuple<std::variant<std::exception_ptr, detail::void_fallback_t<Tasks::ResultType>>...>
+	template<class... Tasks>
+	auto wait_all(Tasks... tasks) {
+		return wait(when_all(tasks...));
 	}
 
 	// TODO: wait/when_all_windows to start at most N tasks at once.
