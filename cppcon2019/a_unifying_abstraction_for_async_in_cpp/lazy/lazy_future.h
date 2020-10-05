@@ -140,44 +140,30 @@ namespace lazy {
 		};
 
 		template<typename P, typename... Tasks>
-		struct when_all_state_ {
+		struct when_all_state_base_ {
 			std::optional<P> p;	// The promise to be called when all tasks finish
 						// TODO: Can we avoid std::optional?
-			std::tuple<typename Tasks::template StateType<P>...> substates;
 			std::tuple<std::variant<std::exception_ptr, detail::void_fallback_t<typename Tasks::ResultType>>...> datas;
 			std::atomic<std::size_t> num_finished{0};
 			static constexpr std::size_t num_tasks = sizeof...(Tasks);
 		};
 
-		template<class... Tasks>
-		struct when_all_state_alias {
-			template<typename P>
-			using type = when_all_state_<P, Tasks...>;
-		};
-
-		template<typename MultiWaitState, int I>
+		template<typename MultiWaitStateBase, typename ResultVariant>
 		struct when_all_promise_ {
-			MultiWaitState* pst;
+			MultiWaitStateBase* pst;
+			ResultVariant* result; // We could have a std::size_t non-type template parameter that holds the index of the task this promise is associated with, thereby saving a pointer. Unfortunately C++ does not make such type manipulations easy.
 
-			when_all_promise_(MultiWaitState* pst):pst(pst){}
+			when_all_promise_(MultiWaitStateBase* pst, ResultVariant* result):pst(pst), result(result){}
 
 			when_all_promise_(const when_all_promise_&) = delete;
-			when_all_promise_(when_all_promise_&& o)
-				: pst(o.pst) {
-				o.pst = nullptr;
-			}
-			~when_all_promise_() {
-				if (pst != nullptr)
-				{
-					std::size_t finish_id = pst->num_finished.fetch_add(1)+1;
-					if (finish_id == pst->num_tasks) { // Last task to end calls the promise
-						pst->p->set_value(std::move(pst->datas));
-					}
-				}
-			}
+			when_all_promise_(when_all_promise_&& o) = default;
 
 			template<int J, typename... XS> void set(XS&&... xs) {
-				std::get<I>(pst->datas).template emplace<J>(std::forward<XS>(xs)...); // This is NOT a race. Different tasks (on different threads) write to different memory locations.
+				result->template emplace<J>(std::forward<XS>(xs)...); // This is NOT a race. Different tasks (on different threads) write to different memory locations.
+				std::size_t finish_id = pst->num_finished.fetch_add(1)+1;
+				if (finish_id == pst->num_tasks) { // Last task to end calls the promise
+					pst->p->set_value(std::move(pst->datas));
+				}
 			}
 
 			template<typename... VS>
@@ -186,10 +172,22 @@ namespace lazy {
 			void set_exception(E e) {set<0>(e);}
 		};
 
+		template<typename P, typename... Tasks>
+		struct when_all_state_ {
+			when_all_state_base_<P, Tasks...> base;
+			std::tuple<typename Tasks::template StateType<when_all_promise_<decltype(base), std::variant<std::exception_ptr, detail::void_fallback_t<typename Tasks::ResultType>>>>...> substates;
+		};
+
+		template<class... Tasks>
+		struct when_all_state_alias {
+			template<typename P>
+			using type = when_all_state_<P, Tasks...>;
+		};
+
 		template<class Tasks, class MultiWaitState, std::size_t... Indices>
 		void when_all_helper_(Tasks tasks, MultiWaitState* state, std::index_sequence<Indices...>)
 		{
-			(..., std::get<Indices>(tasks).cb(detail::when_all_promise_<MultiWaitState, Indices>{state}, &std::get<Indices>(state->substates)));
+			(..., std::get<Indices>(tasks).cb(when_all_promise_<std::remove_reference_t<decltype(state->base)>, std::variant<std::exception_ptr, detail::void_fallback_t<typename std::tuple_element_t<Indices, Tasks>::ResultType>>>{&state->base, &std::get<Indices>(state->base.datas)}, &std::get<Indices>(state->substates)));
 		}
 
 		template<typename Result, typename Callback, template<typename P> class State = detail::empty_state>
@@ -289,8 +287,8 @@ namespace lazy {
 				p.set_value(std::tuple<>{});
 			}
 			else {
-				state->p.emplace(std::move(p));
-				detail::when_all_helper_(std::move(tasks), std::move(state), std::make_index_sequence<sizeof...(Tasks)>{});
+				state->base.p.emplace(std::move(p));
+				detail::when_all_helper_(std::move(tasks), state, std::make_index_sequence<sizeof...(Tasks)>{});
 			}
 		};
 

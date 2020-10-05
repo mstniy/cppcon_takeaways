@@ -11,7 +11,13 @@ int async_algo_quick() {
 int async_algo_slow() {
 	std::cout << "Calculating..." << std::endl;
 	std::this_thread::sleep_for(std::chrono::seconds(1)); // Working hard
-	return 5;
+	return 44;
+}
+
+int async_algo_very_slow() {
+	std::cout << "Calculating..." << std::endl;
+	std::this_thread::sleep_for(std::chrono::seconds(2)); // Working hard
+	return 45;
 }
 
 int main() {
@@ -25,11 +31,13 @@ int main() {
 		std::cout << std::get<1>(std::get<1>(result)) << std::endl;
 	});
 
-	lazy::wait(std::move(f3));
+	auto f4 = lazy::new_thread(async_algo_very_slow).then([](int i){
+		std::cout << i << std::endl;
+	});
 
-	/*auto result = lazy::wait_all(std::move(f1), std::move(f2));
-	std::cout << std::get<1>(std::get<0>(result)) << std::endl;
-	std::cout << std::get<1>(std::get<1>(result)) << std::endl;*/
+	auto f5 = lazy::when_all(std::move(f3), std::move(f4));
+
+	lazy::wait(std::move(f5));
 
 	return 0;
 }
