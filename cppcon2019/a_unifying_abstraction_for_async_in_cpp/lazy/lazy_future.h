@@ -82,16 +82,47 @@ namespace lazy {
 		};
 
 		template<typename P, typename Task>
-		struct vector_when_all_state_ {
+		struct vector_when_all_state_base_ {
 			std::optional<P> p;	// The promise to be called when all tasks finish
 						// TODO: Can we avoid std::optional?
-			std::vector<typename Task::template StateType<P>> substates;
 			std::vector<std::variant<std::exception_ptr, detail::void_fallback_t<typename Task::ResultType>>> datas;
 			std::atomic<std::size_t> num_finished{0};
+		};
+
+		template<typename MultiWaitStateBase>
+		struct vector_when_all_promise_ {
+			MultiWaitStateBase* pst;
+			std::size_t index;
+
+			vector_when_all_promise_(MultiWaitStateBase* state, std::size_t index):
+				pst(state),
+				index(index)
+			{}
+			vector_when_all_promise_(const vector_when_all_promise_&) = delete;
+			vector_when_all_promise_(vector_when_all_promise_&& o) = default;
+
+			template<int I, typename... XS> void set(XS&&... xs) {
+				pst->datas[index].template emplace<I>(std::forward<XS>(xs)...);
+				std::size_t finish_id = pst->num_finished.fetch_add(1)+1;
+				if (finish_id == pst->datas.size()) { // Last task to end calls the promise
+					pst->p->set_value(std::move(pst->datas));
+				}
+			}
+
+			template<typename... VS>
+			void set_value(VS&&... vs) {set<1>(std::forward<VS>(vs)...);}
+			template<typename E>
+			void set_exception(E e) {set<0>(e);}
+		};
+
+		template<typename P, typename Task>
+		struct vector_when_all_state_ {
+			vector_when_all_state_base_<P, Task> base;
+			std::vector<typename Task::template StateType<vector_when_all_promise_<decltype(base)>>> substates;
 
 			void resize(std::size_t size) {
 				substates.resize(size);
-				datas.resize(size);
+				base.datas.resize(size);
 			}
 		};
 
@@ -99,44 +130,6 @@ namespace lazy {
 		struct vector_when_all_state_alias {
 			template<typename P>
 			using type = vector_when_all_state_<P, Task>;
-		};
-
-		template<typename MultiWaitState>
-		struct vector_when_all_promise_ {
-			MultiWaitState* pst;
-			std::size_t index;
-
-			template<int I, typename... XS> void set(XS&&... xs) {
-				pst->datas[index].template emplace<I>(std::forward<XS>(xs)...);
-			}
-
-			template<typename... VS>
-			void set_value(VS&&... vs) {set<1>(std::forward<VS>(vs)...);}
-			template<typename E>
-			void set_exception(E e) {set<0>(e);}
-
-			vector_when_all_promise_(MultiWaitState* state, std::size_t index):
-				pst(state),
-				index(index)
-			{}
-			vector_when_all_promise_(const vector_when_all_promise_&) = delete;
-
-			vector_when_all_promise_(vector_when_all_promise_&& o):
-				pst(o.pst),
-				index(o.index)
-			{
-				o.pst = nullptr;
-			}
-
-			~vector_when_all_promise_() {
-				if (pst != nullptr)
-				{
-					std::size_t finish_id = pst->num_finished.fetch_add(1)+1;
-					if (finish_id == pst->datas.size()) { // Last task to end calls the promise
-						pst->p->set_value(std::move(pst->datas));
-					}
-				}
-			}
 		};
 
 		template<typename P, typename... Tasks>
@@ -268,11 +261,11 @@ namespace lazy {
 				p.set_value(TaskResult{});
 			}
 			else {
-				state->p.emplace(std::move(p));
+				state->base.p.emplace(std::move(p));
 				state->resize(tasks.size());
 
 				for (std::size_t i=0; i<tasks.size(); i++)
-					tasks[i].cb(detail::vector_when_all_promise_<std::remove_reference_t<decltype(*state)>>{state, i}, &state->substates[i]);
+					tasks[i].cb(detail::vector_when_all_promise_<std::remove_reference_t<decltype(state->base)>>{&state->base, i}, &state->substates[i]);
 			}
 		};
 
