@@ -141,18 +141,17 @@ namespace lazy {
 			static constexpr std::size_t num_tasks = sizeof...(Tasks);
 		};
 
-		template<typename MultiWaitStateBase, typename ResultVariant>
+		template<typename MultiWaitStateBase, std::size_t I>
 		struct when_all_promise_ {
 			MultiWaitStateBase* pst;
-			ResultVariant* result; // We could have a std::size_t non-type template parameter that holds the index of the task this promise is associated with, thereby saving a pointer. Unfortunately C++ does not make such type manipulations easy.
 
-			when_all_promise_(MultiWaitStateBase* pst, ResultVariant* result):pst(pst), result(result){}
+			when_all_promise_(MultiWaitStateBase* pst):pst(pst){}
 
 			when_all_promise_(const when_all_promise_&) = delete;
 			when_all_promise_(when_all_promise_&& o) = default;
 
 			template<int J, typename... XS> void set(XS&&... xs) {
-				result->template emplace<J>(std::forward<XS>(xs)...); // This is NOT a race. Different tasks (on different threads) write to different memory locations.
+				std::get<I>(pst->datas).template emplace<J>(std::forward<XS>(xs)...); // This is NOT a race. Different tasks (on different threads) write to different memory locations.
 				std::size_t finish_id = pst->num_finished.fetch_add(1)+1;
 				if (finish_id == pst->num_tasks) { // Last task to end calls the promise
 					pst->p->set_value(std::move(pst->datas));
@@ -165,10 +164,16 @@ namespace lazy {
 			void set_exception(E e) {set<0>(e);}
 		};
 
+		// This is not an actual function. It represents a type transform, so that we can properly set the type of the *substates* field in *when_all_state_*.
+		template<typename P, typename... Tasks, std::size_t... Indices>
+		auto when_all_state_substate_type_transform_helper_(std::index_sequence<Indices...>) ->
+		std::tuple<typename Tasks::template StateType<when_all_promise_<when_all_state_base_<P, Tasks...>, Indices>>...>;
+
+
 		template<typename P, typename... Tasks>
 		struct when_all_state_ {
 			when_all_state_base_<P, Tasks...> base;
-			std::tuple<typename Tasks::template StateType<when_all_promise_<decltype(base), std::variant<std::exception_ptr, detail::void_fallback_t<typename Tasks::ResultType>>>>...> substates;
+			decltype(when_all_state_substate_type_transform_helper_<P, Tasks...>(std::make_index_sequence<sizeof...(Tasks)>{})) substates;
 		};
 
 		template<class... Tasks>
@@ -180,7 +185,7 @@ namespace lazy {
 		template<class Tasks, class MultiWaitState, std::size_t... Indices>
 		void when_all_helper_(Tasks tasks, MultiWaitState* state, std::index_sequence<Indices...>)
 		{
-			(..., std::get<Indices>(tasks).cb(when_all_promise_<std::remove_reference_t<decltype(state->base)>, std::variant<std::exception_ptr, detail::void_fallback_t<typename std::tuple_element_t<Indices, Tasks>::ResultType>>>{&state->base, &std::get<Indices>(state->base.datas)}, &std::get<Indices>(state->substates)));
+			(..., std::get<Indices>(tasks).cb(when_all_promise_<std::remove_reference_t<decltype(state->base)>, Indices>{&state->base}, &std::get<Indices>(state->substates)));
 		}
 
 		template<typename Result, typename Callback, template<typename P> class State = detail::empty_state>
