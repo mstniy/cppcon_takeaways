@@ -182,10 +182,16 @@ namespace lazy {
 			using type = when_all_state_<P, Tasks...>;
 		};
 
-		template<class Tasks, class MultiWaitState, std::size_t... Indices>
-		void when_all_helper_(Tasks tasks, MultiWaitState* state, std::index_sequence<Indices...>)
+		template<std::size_t Index, class Task, class MultiWaitState>
+		void when_all_start_task_(Task task, MultiWaitState* state, std::size_t task_count, bool may_block)
 		{
-			(..., std::get<Indices>(tasks).cb(when_all_promise_<std::remove_reference_t<decltype(state->base)>, Indices>{&state->base}, &std::get<Indices>(state->substates)));
+			task.cb(when_all_promise_<std::remove_reference_t<decltype(state->base)>, Index>{&state->base}, &std::get<Index>(state->substates), may_block && (Index == task_count-1));
+		}
+
+		template<class Tasks, class MultiWaitState, std::size_t... Indices>
+		void when_all_helper_(Tasks tasks, MultiWaitState* state, bool may_block, std::index_sequence<Indices...>)
+		{
+			(..., when_all_start_task_<Indices>(std::move(std::get<Indices>(tasks)), state, std::tuple_size_v<Tasks>, may_block));
 		}
 
 		template<typename Result, typename Callback, template<typename P> class State = detail::empty_state>
@@ -196,12 +202,12 @@ namespace lazy {
 			template<typename P>
 			using StateType = State<P>;
 
-			Callback cb; // Signature: void(Promise, State<Promise>*)
+			Callback cb; // Signature: void(Promise, State<Promise>*, bool may_block)
 
 			template<typename Fun>
 			auto then(Fun fun) {
-				auto lmbd = [cb=std::move(cb), fun=std::move(fun)](auto p, auto* state) mutable{
-					cb(detail::then_promise_<decltype(p), Fun>{std::move(p), std::move(fun)}, state);
+				auto lmbd = [cb=std::move(cb), fun=std::move(fun)](auto p, auto* state, bool may_block) mutable{
+					cb(detail::then_promise_<decltype(p), Fun>{std::move(p), std::move(fun)}, state, may_block);
 				};
 				if constexpr (std::is_void_v<Result>){
 					using FunResult = std::result_of_t<Fun&&()>;
@@ -217,17 +223,22 @@ namespace lazy {
 
 	template<typename Fun>
 	auto new_thread(Fun fun) {
-		auto lmbd =  [](auto p, auto* /*state*/){
-			std::thread t;
-			try {
-				t = std::thread{ [p = std::move(p)]() mutable {
-					p.set_value();
-				}};
+		auto lmbd =  [](auto p, auto* /*state*/, bool may_block){
+			if (may_block) { // If we are allowed to block (i.e., use the current thread), set the promise on the current thread
+				p.set_value();
 			}
-			catch (...) {
-				p.set_exception(std::current_exception());
+			else { // Otherwise, create a new one
+				std::thread t;
+				try {
+					t = std::thread{ [p = std::move(p)]() mutable {
+						p.set_value();
+					}};
+				}
+				catch (...) {
+					p.set_exception(std::current_exception());
+				}
+				t.detach();
 			}
-			t.detach();
 		};
 		return detail::typed_task_<void, decltype(lmbd)>{std::move(lmbd)}.then(std::move(fun));
 	}
@@ -238,7 +249,7 @@ namespace lazy {
 		detail::wait_state_<TaskResult> wait_state;
 		detail::wait_promise_<TaskResult> promise{&wait_state};
 		typename Task::template StateType<decltype(promise)> task_state;
-		task.cb(std::move(promise), &task_state);
+		task.cb(std::move(promise), &task_state, true);
 
 		if (true) {
 			std::unique_lock<std::mutex> lk(wait_state.mtx);
@@ -261,7 +272,7 @@ namespace lazy {
 	auto when_all(std::vector<Task> tasks) {
 		using TaskResult = std::vector<std::variant<std::exception_ptr, detail::void_fallback_t<typename Task::ResultType>>>;
 
-		auto lmbd = [tasks = std::move(tasks)](auto p, auto* state) mutable {
+		auto lmbd = [tasks = std::move(tasks)](auto p, auto* state, bool may_block) mutable {
 			if (tasks.size() == 0) {
 				p.set_value(TaskResult{});
 			}
@@ -270,7 +281,7 @@ namespace lazy {
 				state->resize(tasks.size());
 
 				for (std::size_t i=0; i<tasks.size(); i++)
-					tasks[i].cb(detail::vector_when_all_promise_<std::remove_reference_t<decltype(state->base)>>{&state->base, i}, &state->substates[i]);
+					tasks[i].cb(detail::vector_when_all_promise_<std::remove_reference_t<decltype(state->base)>>{&state->base, i}, &state->substates[i], may_block && (i == tasks.size()-1)); // Can run the last task on the current thread
 			}
 		};
 
@@ -280,13 +291,13 @@ namespace lazy {
 	// The returned task completes with a std::tuple<std::variant<std::exception_ptr, detail::void_fallback_t<Tasks::ResultType>>...>
 	template<class... Tasks>
 	auto when_all(Tasks... tasks) {
-		auto lmbd = [tasks = std::make_tuple(std::move(tasks)...)](auto p, auto* state) mutable {
+		auto lmbd = [tasks = std::make_tuple(std::move(tasks)...)](auto p, auto* state, bool may_block) mutable {
 			if constexpr (sizeof...(Tasks) == 0) {
 				p.set_value(std::tuple<>{});
 			}
 			else {
 				state->base.p.emplace(std::move(p));
-				detail::when_all_helper_(std::move(tasks), state, std::make_index_sequence<sizeof...(Tasks)>{});
+				detail::when_all_helper_(std::move(tasks), state, may_block, std::make_index_sequence<sizeof...(Tasks)>{});
 			}
 		};
 
