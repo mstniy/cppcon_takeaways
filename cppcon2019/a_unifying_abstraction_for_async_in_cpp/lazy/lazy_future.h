@@ -185,7 +185,7 @@ namespace lazy {
 		template<std::size_t Index, class Task, class MultiWaitState>
 		void when_all_start_task_(Task task, MultiWaitState* state, std::size_t task_count, bool may_block)
 		{
-			task.cb(when_all_promise_<std::remove_reference_t<decltype(state->base)>, Index>{&state->base}, &std::get<Index>(state->substates), may_block && (Index == task_count-1));
+			task.start(when_all_promise_<std::remove_reference_t<decltype(state->base)>, Index>{&state->base}, &std::get<Index>(state->substates), may_block && (Index == task_count-1));
 		}
 
 		template<class Tasks, class MultiWaitState, std::size_t... Indices>
@@ -194,7 +194,7 @@ namespace lazy {
 			(..., when_all_start_task_<Indices>(std::move(std::get<Indices>(tasks)), state, std::tuple_size_v<Tasks>, may_block));
 		}
 
-		template<typename Result, typename Callback, template<typename P> class State = detail::empty_state>
+		template<typename Result, typename Starter, template<typename P> class State = detail::empty_state>
 		struct typed_task_
 		{
 			using ResultType = Result;
@@ -202,12 +202,12 @@ namespace lazy {
 			template<typename P>
 			using StateType = State<P>;
 
-			Callback cb; // Signature: void(Promise, State<Promise>*, bool may_block)
+			Starter start; // Signature: void(Promise, State<Promise>*, bool may_block)
 
 			template<typename Fun>
 			auto then(Fun fun) {
-				auto lmbd = [cb=std::move(cb), fun=std::move(fun)](auto p, auto* state, bool may_block) mutable{
-					cb(detail::then_promise_<decltype(p), Fun>{std::move(p), std::move(fun)}, state, may_block);
+				auto lmbd = [start=std::move(start), fun=std::move(fun)](auto p, auto* state, bool may_block) mutable{
+					start(detail::then_promise_<decltype(p), Fun>{std::move(p), std::move(fun)}, state, may_block);
 				};
 				if constexpr (std::is_void_v<Result>){
 					using FunResult = std::result_of_t<Fun&&()>;
@@ -243,13 +243,14 @@ namespace lazy {
 		return detail::typed_task_<void, decltype(lmbd)>{std::move(lmbd)}.then(std::move(fun));
 	}
 
+	// Uses the current thread to perform the last task on the DAG as an optimization
 	template<class Task>
 	auto wait(Task task) {
 		using TaskResult = detail::void_fallback_t<typename Task::ResultType>;
 		detail::wait_state_<TaskResult> wait_state;
 		detail::wait_promise_<TaskResult> promise{&wait_state};
 		typename Task::template StateType<decltype(promise)> task_state;
-		task.cb(std::move(promise), &task_state, true);
+		task.start(std::move(promise), &task_state, true);
 
 		if (true) {
 			std::unique_lock<std::mutex> lk(wait_state.mtx);
@@ -281,7 +282,7 @@ namespace lazy {
 				state->resize(tasks.size());
 
 				for (std::size_t i=0; i<tasks.size(); i++)
-					tasks[i].cb(detail::vector_when_all_promise_<std::remove_reference_t<decltype(state->base)>>{&state->base, i}, &state->substates[i], may_block && (i == tasks.size()-1)); // Can run the last task on the current thread
+					tasks[i].start(detail::vector_when_all_promise_<std::remove_reference_t<decltype(state->base)>>{&state->base, i}, &state->substates[i], may_block && (i == tasks.size()-1)); // Can run the last task on the current thread
 			}
 		};
 
